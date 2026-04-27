@@ -1,237 +1,209 @@
 # Database Schema — Backend
 
 > PostgreSQL schema đầy đủ. Chỉ Backend cần biết.
+> Managed bởi EF Core Migrations — không sửa DB tay.
 
 ---
 
 ## Nguyên tắc
 
-- Mỗi service có database schema riêng (tách bằng PostgreSQL schema/namespace)
-- Primary key: `UUID` dùng `gen_random_uuid()`
+- Single database, single DbContext (`ApplicationDbContext`)
+- Primary key: `UUID` (`Guid` trong C#, `gen_random_uuid()` trong PostgreSQL)
 - Timestamps: `TIMESTAMPTZ NOT NULL DEFAULT NOW()`
 - Soft delete: `deleted_at TIMESTAMPTZ NULL`
-- Index: đặt tên `idx_{table}_{column(s)}`
-- Migration: dùng EF Core Migrations, không sửa DB tay
+- Index: đặt tên `IX_{Table}_{Column(s)}` (EF Core convention)
+- Migration: `dotnet ef migrations add` — không sửa DB tay
 
 ---
 
-## Schema: identity
+## Entities & Tables
+
+### identity.users → `Users`
 
 ```sql
-CREATE SCHEMA IF NOT EXISTS identity;
-
--- Users
-CREATE TABLE identity.users (
-  id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  zalo_id         VARCHAR(50)  NOT NULL UNIQUE,
-  display_name    VARCHAR(100) NOT NULL,
-  avatar_url      TEXT,
-  total_points    INT          NOT NULL DEFAULT 0,
-  rank_title      VARCHAR(50)  NOT NULL DEFAULT 'Thôn',
-  is_active       BOOLEAN      NOT NULL DEFAULT true,
-  created_at      TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
-  updated_at      TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
-  last_login_at   TIMESTAMPTZ,
-  deleted_at      TIMESTAMPTZ
+CREATE TABLE "Users" (
+  "Id"            UUID         PRIMARY KEY DEFAULT gen_random_uuid(),
+  "ZaloId"        VARCHAR(50)  NOT NULL UNIQUE,
+  "DisplayName"   VARCHAR(100) NOT NULL,
+  "AvatarUrl"     TEXT,
+  "TotalPoints"   INT          NOT NULL DEFAULT 0,
+  "RankTitle"     VARCHAR(50)  NOT NULL DEFAULT 'Thôn',
+  "IsActive"      BOOLEAN      NOT NULL DEFAULT true,
+  "CreatedAt"     TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+  "UpdatedAt"     TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+  "LastLoginAt"   TIMESTAMPTZ,
+  "DeletedAt"     TIMESTAMPTZ
 );
 
-CREATE INDEX idx_users_zalo_id ON identity.users(zalo_id);
-CREATE INDEX idx_users_total_points ON identity.users(total_points DESC);
-CREATE INDEX idx_users_rank_title ON identity.users(rank_title);
-
--- Auto-update updated_at
-CREATE OR REPLACE FUNCTION update_updated_at()
-RETURNS TRIGGER AS $$
-BEGIN NEW.updated_at = NOW(); RETURN NEW; END;
-$$ LANGUAGE plpgsql;
-
-CREATE TRIGGER trg_users_updated_at
-  BEFORE UPDATE ON identity.users
-  FOR EACH ROW EXECUTE FUNCTION update_updated_at();
+CREATE INDEX "IX_Users_ZaloId" ON "Users"("ZaloId");
+CREATE INDEX "IX_Users_TotalPoints" ON "Users"("TotalPoints" DESC);
 ```
+
+**C# Aggregate:** `src/DanGian.Domain/Aggregates/User.cs`
 
 ---
 
-## Schema: game
+### game.sessions → `GameSessions`
 
 ```sql
-CREATE SCHEMA IF NOT EXISTS game;
-
--- Game sessions
-CREATE TABLE game.sessions (
-  id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  game_type       VARCHAR(50)  NOT NULL,  -- 'o_an_quan', 'co_caro'...
-  mode            VARCHAR(20)  NOT NULL,  -- 'solo', 'ranked', 'room'
-  player1_id      UUID         NOT NULL,  -- FK → identity.users.id
-  player2_id      UUID,                   -- NULL nếu vs AI
-  winner_id       UUID,                   -- NULL nếu chưa kết thúc / hòa
-  is_draw         BOOLEAN      NOT NULL DEFAULT false,
-  player1_score   INT          NOT NULL DEFAULT 0,
-  player2_score   INT          NOT NULL DEFAULT 0,
-  player1_side    SMALLINT     NOT NULL DEFAULT 1, -- 1 = hàng dưới
-  ai_difficulty   VARCHAR(20),            -- 'easy'|'medium'|'hard', NULL nếu PvP
-  initial_state   JSONB        NOT NULL,
-  final_state     JSONB,
-  moves           JSONB        NOT NULL DEFAULT '[]',
-  points_awarded  INT          NOT NULL DEFAULT 0,
-  status          VARCHAR(20)  NOT NULL DEFAULT 'playing', -- playing|finished|abandoned
-  room_id         UUID,                   -- FK → game.rooms.id nếu mode=room
-  started_at      TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
-  ended_at        TIMESTAMPTZ,
-  created_at      TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
-  updated_at      TIMESTAMPTZ  NOT NULL DEFAULT NOW()
+CREATE TABLE "GameSessions" (
+  "Id"            UUID         PRIMARY KEY DEFAULT gen_random_uuid(),
+  "GameType"      VARCHAR(50)  NOT NULL,   -- 'o_an_quan', 'co_caro'
+  "Mode"          VARCHAR(20)  NOT NULL,   -- 'solo', 'ranked', 'room'
+  "Player1Id"     UUID         NOT NULL REFERENCES "Users"("Id"),
+  "Player2Id"     UUID         REFERENCES "Users"("Id"),  -- NULL nếu vs AI
+  "WinnerId"      UUID,
+  "IsDraw"        BOOLEAN      NOT NULL DEFAULT false,
+  "Player1Score"  INT          NOT NULL DEFAULT 0,
+  "Player2Score"  INT          NOT NULL DEFAULT 0,
+  "Player1Side"   SMALLINT     NOT NULL DEFAULT 1,
+  "AiDifficulty"  VARCHAR(20),             -- 'easy'|'medium'|'hard', NULL nếu PvP
+  "InitialState"  JSONB        NOT NULL,
+  "FinalState"    JSONB,
+  "Moves"         JSONB        NOT NULL DEFAULT '[]',
+  "PointsAwarded" INT          NOT NULL DEFAULT 0,
+  "Status"        VARCHAR(20)  NOT NULL DEFAULT 'playing',  -- playing|finished|abandoned
+  "RoomId"        UUID         REFERENCES "Rooms"("Id"),
+  "StartedAt"     TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+  "EndedAt"       TIMESTAMPTZ,
+  "CreatedAt"     TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+  "UpdatedAt"     TIMESTAMPTZ  NOT NULL DEFAULT NOW()
 );
 
-CREATE INDEX idx_sessions_player1_id ON game.sessions(player1_id);
-CREATE INDEX idx_sessions_player2_id ON game.sessions(player2_id);
-CREATE INDEX idx_sessions_game_type ON game.sessions(game_type);
-CREATE INDEX idx_sessions_mode ON game.sessions(mode);
-CREATE INDEX idx_sessions_status ON game.sessions(status);
-CREATE INDEX idx_sessions_started_at ON game.sessions(started_at DESC);
-
--- Rooms (phòng bạn bè)
-CREATE TABLE game.rooms (
-  id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  room_code   VARCHAR(6)   NOT NULL UNIQUE,
-  game_type   VARCHAR(50)  NOT NULL,
-  host_id     UUID         NOT NULL,
-  status      VARCHAR(20)  NOT NULL DEFAULT 'waiting',
-  max_players SMALLINT     NOT NULL DEFAULT 2,
-  created_at  TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
-  expires_at  TIMESTAMPTZ  NOT NULL DEFAULT NOW() + INTERVAL '2 hours'
-);
-
-CREATE INDEX idx_rooms_room_code ON game.rooms(room_code);
-CREATE INDEX idx_rooms_host_id ON game.rooms(host_id);
-CREATE INDEX idx_rooms_status ON game.rooms(status);
-
--- Room players
-CREATE TABLE game.room_players (
-  room_id     UUID        NOT NULL,
-  user_id     UUID        NOT NULL,
-  joined_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-  is_ready    BOOLEAN     NOT NULL DEFAULT false,
-  PRIMARY KEY (room_id, user_id)
-);
+CREATE INDEX "IX_GameSessions_Player1Id" ON "GameSessions"("Player1Id");
+CREATE INDEX "IX_GameSessions_Player2Id" ON "GameSessions"("Player2Id");
+CREATE INDEX "IX_GameSessions_Status" ON "GameSessions"("Status");
+CREATE INDEX "IX_GameSessions_StartedAt" ON "GameSessions"("StartedAt" DESC);
 ```
+
+**C# Aggregate:** `src/DanGian.Domain/Aggregates/GameSession.cs`
 
 ---
 
-## Schema: mission
+### game.rooms → `Rooms`
 
 ```sql
-CREATE SCHEMA IF NOT EXISTS mission;
-
--- Mission definitions (seed data)
-CREATE TABLE mission.definitions (
-  id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  type            VARCHAR(50)  NOT NULL UNIQUE, -- 'daily_login', 'win_games'...
-  title           VARCHAR(200) NOT NULL,
-  description     TEXT,
-  reward_points   INT          NOT NULL,
-  target          INT          NOT NULL DEFAULT 1,
-  reset_type      VARCHAR(20)  NOT NULL DEFAULT 'daily', -- 'daily'|'weekly'|'once'
-  game_type       VARCHAR(50),  -- NULL = mọi game
-  is_active       BOOLEAN      NOT NULL DEFAULT true,
-  created_at      TIMESTAMPTZ  NOT NULL DEFAULT NOW()
+CREATE TABLE "Rooms" (
+  "Id"          UUID         PRIMARY KEY DEFAULT gen_random_uuid(),
+  "RoomCode"    VARCHAR(6)   NOT NULL UNIQUE,
+  "GameType"    VARCHAR(50)  NOT NULL,
+  "HostId"      UUID         NOT NULL REFERENCES "Users"("Id"),
+  "Status"      VARCHAR(20)  NOT NULL DEFAULT 'waiting',  -- waiting|playing|finished
+  "MaxPlayers"  SMALLINT     NOT NULL DEFAULT 2,
+  "CreatedAt"   TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+  "ExpiresAt"   TIMESTAMPTZ  NOT NULL DEFAULT NOW() + INTERVAL '2 hours'
 );
 
--- User mission progress (reset hàng ngày)
-CREATE TABLE mission.user_progress (
-  id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  user_id         UUID         NOT NULL,
-  definition_id   UUID         NOT NULL REFERENCES mission.definitions(id),
-  date            DATE         NOT NULL DEFAULT CURRENT_DATE,
-  progress        INT          NOT NULL DEFAULT 0,
-  status          VARCHAR(20)  NOT NULL DEFAULT 'pending',
-  claimed_at      TIMESTAMPTZ,
-  created_at      TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
-  updated_at      TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
-  UNIQUE (user_id, definition_id, date)
-);
-
-CREATE INDEX idx_user_progress_user_date ON mission.user_progress(user_id, date);
-CREATE INDEX idx_user_progress_status ON mission.user_progress(status);
-
--- Point transactions (audit log)
-CREATE TABLE mission.point_transactions (
-  id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  user_id         UUID         NOT NULL,
-  delta           INT          NOT NULL,  -- dương = cộng, âm = trừ
-  reason          VARCHAR(100) NOT NULL,  -- 'mission_claim', 'game_win'...
-  reference_id    UUID,                   -- mission_id hoặc session_id
-  created_at      TIMESTAMPTZ  NOT NULL DEFAULT NOW()
-);
-
-CREATE INDEX idx_point_tx_user_id ON mission.point_transactions(user_id);
-CREATE INDEX idx_point_tx_created_at ON mission.point_transactions(created_at DESC);
+CREATE INDEX "IX_Rooms_RoomCode" ON "Rooms"("RoomCode");
+CREATE INDEX "IX_Rooms_HostId" ON "Rooms"("HostId");
 ```
+
+**C# Aggregate:** `src/DanGian.Domain/Aggregates/Room.cs`
 
 ---
 
-## Schema: leaderboard
+### mission.definitions → `MissionDefinitions`
 
 ```sql
-CREATE SCHEMA IF NOT EXISTS leaderboard;
-
--- Season definitions
-CREATE TABLE leaderboard.seasons (
-  id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  season_num  INT          NOT NULL UNIQUE,
-  start_date  DATE         NOT NULL,
-  end_date    DATE         NOT NULL,
-  is_active   BOOLEAN      NOT NULL DEFAULT false,
-  created_at  TIMESTAMPTZ  NOT NULL DEFAULT NOW()
+CREATE TABLE "MissionDefinitions" (
+  "Id"            UUID         PRIMARY KEY DEFAULT gen_random_uuid(),
+  "Type"          VARCHAR(50)  NOT NULL UNIQUE,   -- 'daily_login', 'win_games'
+  "Title"         VARCHAR(200) NOT NULL,
+  "Description"   TEXT,
+  "RewardPoints"  INT          NOT NULL,
+  "Target"        INT          NOT NULL DEFAULT 1,
+  "ResetType"     VARCHAR(20)  NOT NULL DEFAULT 'daily',  -- 'daily'|'weekly'|'once'
+  "GameType"      VARCHAR(50),   -- NULL = mọi game
+  "IsActive"      BOOLEAN      NOT NULL DEFAULT true,
+  "CreatedAt"     TIMESTAMPTZ  NOT NULL DEFAULT NOW()
 );
-
--- Season rankings snapshot (cuối mùa)
-CREATE TABLE leaderboard.season_rankings (
-  id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  season_id   UUID         NOT NULL REFERENCES leaderboard.seasons(id),
-  user_id     UUID         NOT NULL,
-  rank        INT          NOT NULL,
-  points      INT          NOT NULL,
-  created_at  TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
-  UNIQUE (season_id, user_id)
-);
-
-CREATE INDEX idx_season_rankings_season_rank ON leaderboard.season_rankings(season_id, rank);
 ```
+
+**C# Aggregate:** `src/DanGian.Domain/Aggregates/MissionDefinition.cs`
+
+---
+
+### mission.user_progress → `UserMissionProgresses`
+
+```sql
+CREATE TABLE "UserMissionProgresses" (
+  "Id"            UUID         PRIMARY KEY DEFAULT gen_random_uuid(),
+  "UserId"        UUID         NOT NULL REFERENCES "Users"("Id"),
+  "DefinitionId"  UUID         NOT NULL REFERENCES "MissionDefinitions"("Id"),
+  "Date"          DATE         NOT NULL DEFAULT CURRENT_DATE,
+  "Progress"      INT          NOT NULL DEFAULT 0,
+  "Status"        VARCHAR(20)  NOT NULL DEFAULT 'pending',  -- pending|in_progress|completed|claimed
+  "ClaimedAt"     TIMESTAMPTZ,
+  "CreatedAt"     TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+  "UpdatedAt"     TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+  UNIQUE ("UserId", "DefinitionId", "Date")
+);
+
+CREATE INDEX "IX_UserMissionProgresses_UserId_Date" ON "UserMissionProgresses"("UserId", "Date");
+```
+
+**C# Aggregate:** `src/DanGian.Domain/Aggregates/UserMissionProgress.cs`
+
+---
+
+### leaderboard.seasons → `Seasons`
+
+```sql
+CREATE TABLE "Seasons" (
+  "Id"          UUID         PRIMARY KEY DEFAULT gen_random_uuid(),
+  "SeasonNum"   INT          NOT NULL UNIQUE,
+  "StartDate"   DATE         NOT NULL,
+  "EndDate"     DATE         NOT NULL,
+  "IsActive"    BOOLEAN      NOT NULL DEFAULT false,
+  "CreatedAt"   TIMESTAMPTZ  NOT NULL DEFAULT NOW()
+);
+```
+
+**C# Aggregate:** `src/DanGian.Domain/Aggregates/Season.cs`
 
 ---
 
 ## Seed data (Mission definitions)
 
 ```sql
-INSERT INTO mission.definitions (type, title, description, reward_points, target, reset_type, game_type)
+INSERT INTO "MissionDefinitions" ("Id", "Type", "Title", "Description", "RewardPoints", "Target", "ResetType", "GameType")
 VALUES
-  ('daily_login',   'Đăng nhập hôm nay',         'Mở app và đăng nhập',          50,  1, 'daily',  NULL),
-  ('win_3_games',   'Thắng 3 ván',                'Thắng 3 ván bất kỳ',           150, 3, 'daily',  NULL),
-  ('play_with_friend', 'Chơi cùng bạn Zalo',      'Chơi 1 ván phòng bạn bè',      180, 1, 'daily',  NULL),
-  ('win_5_streak',  'Thắng 5 ván liên tiếp',      'Thắng 5 ván không thua',       200, 5, 'weekly', NULL),
-  ('complete_tutorial', 'Hoàn thành hướng dẫn',   'Xem hướng dẫn cách chơi',      50,  1, 'once',   'o_an_quan');
+  (gen_random_uuid(), 'daily_login',        'Đăng nhập hôm nay',        'Mở app và đăng nhập',         50,  1, 'daily',  NULL),
+  (gen_random_uuid(), 'win_3_games',        'Thắng 3 ván',              'Thắng 3 ván bất kỳ',          150, 3, 'daily',  NULL),
+  (gen_random_uuid(), 'play_with_friend',   'Chơi cùng bạn Zalo',       'Chơi 1 ván phòng bạn bè',     180, 1, 'daily',  NULL),
+  (gen_random_uuid(), 'win_5_streak',       'Thắng 5 ván liên tiếp',    'Thắng 5 ván không thua',      200, 5, 'weekly', NULL),
+  (gen_random_uuid(), 'complete_tutorial',  'Hoàn thành hướng dẫn',     'Xem hướng dẫn cách chơi',     50,  1, 'once',   'o_an_quan');
 ```
 
 ---
 
-## Migration strategy
+## Migration commands
 
 ```bash
-# Tạo migration mới (chạy trong thư mục service)
-dotnet ef migrations add InitialCreate --project src/ServiceName
+# Từ thư mục root của solution
+dotnet ef migrations add <MigrationName> \
+  --project src/DanGian.Infrastructure \
+  --startup-project src/DanGian.Api
 
 # Apply migration
-dotnet ef database update
+dotnet ef database update \
+  --project src/DanGian.Infrastructure \
+  --startup-project src/DanGian.Api
 
-# Revert migration
-dotnet ef database update PreviousMigrationName
+# Xem SQL script (không apply)
+dotnet ef migrations script \
+  --project src/DanGian.Infrastructure \
+  --startup-project src/DanGian.Api
 
-# Xem SQL (không apply)
-dotnet ef migrations script
+# Revert về migration trước
+dotnet ef database update <PreviousMigrationName> \
+  --project src/DanGian.Infrastructure \
+  --startup-project src/DanGian.Api
 ```
 
-**Quy tắc migration:**
+## Quy tắc migration
+
 - Không bao giờ sửa migration đã commit
-- Mỗi thay đổi schema = 1 migration mới
-- Migration phải chạy được idempotent (chạy nhiều lần không lỗi)
-- Có migration `Down()` rõ ràng để rollback
+- Mỗi thay đổi schema = 1 migration mới với tên rõ ràng (VD: `AddUserLastLoginAt`)
+- Luôn có method `Down()` để rollback
+- Chạy migration qua CI/CD — không apply tay lên production

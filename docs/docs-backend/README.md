@@ -88,12 +88,13 @@ public class LoginCommandValidator : AbstractValidator<LoginCommand>
 |------|---------|
 | `PROJECT_CONTEXT.md` | Context chung |
 | `API_CONTRACT.md` | Interface với Frontend — source of truth |
+| `DOMAIN_MODEL.md` | **Domain model chi tiết: vai trò, ý nghĩa từng trường, business rules** |
 | `GAME_RULES.md` | Luật Ô Ăn Quan |
-| `SYSTEM_DESIGN.md` | Architecture, layers, patterns |
+| `SYSTEM_DESIGN.md` | Architecture, layers, patterns, request flow |
 | `DATABASE_SCHEMA.md` | PostgreSQL schema, migrations |
-| `FREE_STACK.md` | Supabase, Upstash, Fly.io setup |
+| `FREE_STACK.md` | Supabase, Fly.io setup |
 | `AI_WORKFLOW.md` | Quy trình làm việc, prompt patterns |
-| `SKILL_BACKEND.md` | C# conventions, patterns |
+| `SKILL_BACKEND.md` | C# conventions, CQRS patterns |
 
 ## Migration
 

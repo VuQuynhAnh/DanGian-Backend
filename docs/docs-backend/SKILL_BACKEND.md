@@ -1,6 +1,5 @@
 # SKILL — Backend (C# / ASP.NET Core)
 
-> Upload file này vào Claude Project Backend.
 > Áp dụng cho mọi coding task trong dự án Dân Gian — Backend.
 
 ---
@@ -8,12 +7,33 @@
 ## Stack bắt buộc
 
 - **Runtime:** C# 12 / .NET 8 (ASP.NET Core)
-- **Realtime service:** Node.js 20 + TypeScript + Socket.IO 4
+- **Pattern:** Clean Architecture + DDD + CQRS (MediatR)
 - **ORM:** EF Core 8 (PostgreSQL provider: Npgsql)
-- **Validation:** FluentValidation
-- **Testing:** xUnit + Moq + TestContainers
-- **Logging:** Serilog → stdout (Docker-friendly)
-- **Mapping:** Mapster (hoặc manual mapping — không dùng AutoMapper)
+- **Validation:** FluentValidation 12
+- **Realtime:** SignalR (không dùng Socket.IO)
+- **Testing:** xUnit + Moq
+- **Logging:** Serilog → stdout
+
+---
+
+## Architecture (CQRS — MediatR)
+
+```
+HTTP Request
+→ Controller (kế thừa BaseApiController)
+→ Sender.Send(ICommand | IQuery)      ← MediatR dispatch
+→ LoggingBehavior → ValidationBehavior ← Pipeline Behaviors
+→ CommandHandler | QueryHandler        ← business logic
+→ Repository → EF Core → PostgreSQL
+→ Result<T>
+→ BaseApiController.HandleResult()     ← map → HTTP + ApiResponse<T>
+```
+
+**Layer rule:**
+- Controller KHÔNG chứa business logic — chỉ gọi `Sender.Send()` và `HandleResult()`
+- Handler KHÔNG throw exception — dùng `Result.Failure(error)`
+- Repository interface ở Domain, implementation ở Infrastructure (internal)
+- Entity KHÔNG expose ra ngoài Controller — dùng Response record
 
 ---
 
@@ -25,18 +45,108 @@
 // Parameters, local variables: camelCase
 // Private fields: _camelCase
 // Constants: UPPER_SNAKE_CASE
-// Interfaces: tiền tố I (IGameRepository)
-// DTOs: suffix Request/Response (CreateGameRequest, GameStateResponse)
-// Exceptions: suffix Exception (InvalidMoveException)
+// Interfaces: tiền tố I (IUserRepository)
+// Commands: suffix Command (LoginCommand)
+// Queries: suffix Query (GetProfileQuery)
+// Responses: suffix Response (LoginResponse)
+// Validators: suffix Validator (LoginCommandValidator)
+// Exceptions: suffix Exception (NotFoundException)
 ```
 
-### Architecture
+### Command / Query / Handler
+```csharp
+// Command: sealed record implements ICommand<TResponse>
+public sealed record LoginCommand(
+    string ZaloId,
+    string DisplayName,
+    string? AvatarUrl) : ICommand<LoginResponse>;
+
+// Query: sealed record implements IQuery<TResponse>
+public sealed record GetProfileQuery(Guid UserId) : IQuery<GetProfileResponse>;
+
+// Handler: internal sealed class
+internal sealed class LoginCommandHandler : ICommandHandler<LoginCommand, LoginResponse>
+{
+    public async Task<Result<LoginResponse>> Handle(
+        LoginCommand request, CancellationToken cancellationToken)
+    {
+        // Business logic ở đây
+        // KHÔNG throw — dùng Result.Failure
+        if (user is null)
+            return Result.Failure<LoginResponse>(Error.NotFound("User", request.ZaloId));
+
+        return Result.Success(new LoginResponse(...));
+    }
+}
+
+// Response: sealed record
+public sealed record LoginResponse(
+    Guid UserId,
+    string DisplayName,
+    string AccessToken);
 ```
-Controller  → nhận HTTP, validate input, gọi Service, trả DTO
-Service     → business logic, gọi Repository, throw exceptions
-Repository  → EF Core queries, không có business logic
-Entity      → EF Core model, KHÔNG expose ra ngoài Controller
-DTO         → Request/Response objects, tách hoàn toàn khỏi Entity
+
+### Controller
+```csharp
+// Kế thừa BaseApiController, KHÔNG inject service trực tiếp
+[ApiController]
+[Route("api/[controller]")]
+public sealed class AuthController : BaseApiController
+{
+    [HttpPost("zalo")]
+    public async Task<IActionResult> Login(
+        LoginRequest request, CancellationToken ct)
+    {
+        var command = new LoginCommand(request.ZaloId, request.DisplayName, request.AvatarUrl);
+        var result = await Sender.Send(command, ct);
+        return HandleResult(result);
+    }
+}
+```
+
+### Validator
+```csharp
+public sealed class LoginCommandValidator : AbstractValidator<LoginCommand>
+{
+    public LoginCommandValidator()
+    {
+        RuleFor(x => x.ZaloId).NotEmpty().MaximumLength(50);
+        RuleFor(x => x.DisplayName).NotEmpty().MaximumLength(100);
+    }
+}
+```
+
+### Repository
+```csharp
+// Interface ở Domain
+public interface IUserRepository
+{
+    Task<User?> GetByIdAsync(Guid id, CancellationToken ct = default);
+    Task<User?> GetByZaloIdAsync(string zaloId, CancellationToken ct = default);
+    Task AddAsync(User user, CancellationToken ct = default);
+    void Update(User user);
+}
+
+// Implementation ở Infrastructure (internal)
+internal sealed class UserRepository : BaseRepository<User>, IUserRepository
+{
+    public UserRepository(ApplicationDbContext context) : base(context) { }
+
+    public async Task<User?> GetByZaloIdAsync(string zaloId, CancellationToken ct = default) =>
+        await DbSet.FirstOrDefaultAsync(u => u.ZaloId == zaloId && u.DeletedAt == null, ct);
+}
+```
+
+### Result Pattern
+```csharp
+// Thành công
+return Result.Success(new LoginResponse(...));
+return Result.Success<LoginResponse>(response);
+
+// Thất bại — KHÔNG throw
+return Result.Failure<LoginResponse>(Error.NotFound("User", id));
+return Result.Failure<LoginResponse>(Error.Conflict("User.AlreadyExists", "..."));
+return Result.Failure<LoginResponse>(Error.Validation("User.InvalidInput", "..."));
 ```
 
 ### Async
@@ -45,34 +155,15 @@ DTO         → Request/Response objects, tách hoàn toàn khỏi Entity
 // LUÔN nhận CancellationToken
 // KHÔNG dùng .Result hoặc .Wait() — deadlock risk
 // KHÔNG dùng async void — dùng async Task
-
-public async Task<GameSession> CreateAsync(
-    CreateSessionRequest request,
-    CancellationToken ct = default)
-{
-    // ...
-}
-```
-
-### Error handling
-```csharp
-// Dùng custom exceptions, không return null cho "not found"
-// Global middleware bắt exception → format theo API_CONTRACT.md
-
-public async Task<GameSession> GetByIdAsync(Guid id, CancellationToken ct = default)
-{
-    var session = await _context.Sessions
-        .FirstOrDefaultAsync(s => s.Id == id, ct);
-
-    return session ?? throw new NotFoundException($"Session {id} not found");
-}
+public async Task<User?> GetByIdAsync(Guid id, CancellationToken ct = default) =>
+    await DbSet.FirstOrDefaultAsync(e => e.Id == id, ct);
 ```
 
 ### Không hardcode
 ```csharp
 // LUÔN đọc từ IConfiguration hoặc Environment
-var secret = _config["JWT:Secret"]
-    ?? throw new InvalidOperationException("JWT:Secret not configured");
+var secret = _config["Jwt__Secret"]
+    ?? throw new InvalidOperationException("Jwt__Secret not configured");
 
 // KHÔNG BAO GIỜ
 var secret = "my-secret-key-hardcoded"; // ❌
@@ -80,129 +171,52 @@ var secret = "my-secret-key-hardcoded"; // ❌
 
 ---
 
-## Output format bắt buộc
+## Cấu trúc file feature mới
 
-```markdown
-## Implementation: [Tên feature]
-
-### File: `apps/[service]/[path/to/file.cs]`
-\```csharp
-// code
-\```
-
-### File: `apps/[service]/Tests/Unit/[path/to/test.cs]`
-\```csharp
-// xUnit test
-\```
-
-### Giải thích kỹ thuật
-- **[Quyết định]:** lý do
-
-### Checklist trước khi merge
-- [ ] Unit test pass (xunit)
-- [ ] Không hardcode credential
-- [ ] Input validation đầy đủ (FluentValidation)
-- [ ] Async/await + CancellationToken
-- [ ] Logging đủ (không log sensitive data)
-- [ ] Follow API_CONTRACT.md response format
 ```
+src/DanGian.Application/Features/{Context}/{Commands|Queries}/{FeatureName}/
+  ├── {Name}Command.cs          ← sealed record : ICommand<TResponse>
+  ├── {Name}CommandHandler.cs   ← internal sealed class : ICommandHandler<...>
+  ├── {Name}CommandValidator.cs ← sealed class : AbstractValidator<TCommand>
+  └── {Name}Response.cs         ← sealed record (DTO trả về)
+```
+
+Contexts: `Identity`, `Game`, `Mission`, `Leaderboard`
 
 ---
 
-## Patterns chuẩn trong dự án
+## Checklist trước khi merge
 
-### Repository Pattern
-```csharp
-public interface IGameSessionRepository
-{
-    Task<GameSession?> GetByIdAsync(Guid id, CancellationToken ct = default);
-    Task<GameSession> CreateAsync(GameSession session, CancellationToken ct = default);
-    Task UpdateAsync(GameSession session, CancellationToken ct = default);
-    Task<IReadOnlyList<GameSession>> GetByPlayerIdAsync(
-        Guid playerId, int page, int limit, CancellationToken ct = default);
-}
-```
-
-### Result Pattern (business logic)
-```csharp
-public record Result<T>
-{
-    public bool IsSuccess { get; init; }
-    public T? Value { get; init; }
-    public string? ErrorCode { get; init; }
-
-    public static Result<T> Ok(T value) =>
-        new() { IsSuccess = true, Value = value };
-
-    public static Result<T> Fail(string errorCode) =>
-        new() { IsSuccess = false, ErrorCode = errorCode };
-}
-```
-
-### Response format (theo API_CONTRACT.md)
-```csharp
-public record ApiResponse<T>
-{
-    public bool Success { get; init; }
-    public T? Data { get; init; }
-    public ApiError? Error { get; init; }
-    public ApiMeta Meta { get; init; } = new();
-}
-
-public record ApiMeta
-{
-    public string Timestamp { get; init; } = DateTime.UtcNow.ToString("O");
-}
-
-public record ApiError(string Code, string Message);
-```
-
-### Socket.IO events (Node.js realtime service)
-```typescript
-// Typed events — luôn dùng interface
-interface ServerToClientEvents {
-  'game:state': (data: GameStateEvent) => void;
-  'game:end': (data: GameEndEvent) => void;
-  'game:start': (data: GameStartEvent) => void;
-  'room:updated': (data: RoomUpdatedEvent) => void;
-  'ranked:matched': (data: RankedMatchedEvent) => void;
-  'error': (data: ErrorEvent) => void;
-}
-
-interface ClientToServerEvents {
-  'game:move': (
-    data: MakeMoveRequest,
-    callback: (res: MakeMoveResponse) => void
-  ) => void;
-  'room:join': (data: { roomId: string }) => void;
-  'room:ready': (data: { roomId: string }) => void;
-  'room:leave': (data: { roomId: string }) => void;
-  'ranked:queue': (data: { gameType: string }) => void;
-}
-```
+- [ ] Unit test pass (xUnit + Moq)
+- [ ] Không hardcode credential / connection string
+- [ ] FluentValidation đầy đủ cho mọi input từ user
+- [ ] Async/await + CancellationToken trên mọi method DB/I/O
+- [ ] Handler dùng Result.Failure thay vì throw
+- [ ] Logging không chứa sensitive data (token, password)
+- [ ] Follow response format `ApiResponse<T>` từ `API_CONTRACT.md`
+- [ ] `[Authorize]` attribute trên endpoint cần auth
 
 ---
 
 ## Test naming convention
 ```csharp
 // [MethodName]_[Scenario]_[ExpectedResult]
-public async Task MakeMove_ValidCell_ReturnsUpdatedState() { }
-public async Task MakeMove_EmptyCell_ThrowsInvalidMoveException() { }
-public async Task GetById_NonExistentId_ThrowsNotFoundException() { }
-public void CalculateScore_AllCaptured_ReturnsCorrectTotal() { }
+public async Task Handle_ValidZaloId_ReturnsLoginResponse() { }
+public async Task Handle_EmptyZaloId_ReturnsFailure() { }
+public async Task Handle_UserNotFound_ReturnsNotFoundError() { }
+public void Validate_MissingZaloId_HasValidationError() { }
 ```
 
 ---
 
-## Security checklist (tự động kiểm tra mọi PR)
+## Security checklist
 
 - [ ] Không hardcode secret / credential / connection string
-- [ ] Input validation với FluentValidation tại mọi endpoint
+- [ ] Input validation với FluentValidation tại mọi Command/Query
 - [ ] EF Core parameterized query (không raw string concat)
 - [ ] JWT claims được validate đầy đủ (issuer, audience, expiry)
-- [ ] Authorization attribute trên mọi endpoint cần auth
+- [ ] `[Authorize]` attribute trên mọi endpoint cần auth
 - [ ] Sensitive data không log (password, token, zalo_secret)
-- [ ] Rate limiting áp dụng cho endpoint public
 - [ ] HTTPS-only cho production (HSTS header)
 
 ---
@@ -213,9 +227,9 @@ public void CalculateScore_AllCaptured_ReturnsCorrectTotal() { }
 |-----|-----------|
 | `async void` | `async Task` |
 | `.Result` / `.Wait()` | `await` |
-| Catch `Exception` quá rộng | Catch exception cụ thể |
+| Throw từ Handler | `Result.Failure(error)` |
+| Inject DbContext trực tiếp vào Handler | Inject Repository + IUnitOfWork |
 | N+1 query | `.Include()` hoặc explicit join |
 | Thiếu index trên FK | Luôn index FK và WHERE columns |
 | Magic string | Constant hoặc enum |
-| Không dispose DbContext | DI scoped lifetime hoặc `using` |
-| Return null thay vì throw | Throw `NotFoundException` |
+| Return null từ Query Handler | `Result.Failure(Error.NotFound(...))` |

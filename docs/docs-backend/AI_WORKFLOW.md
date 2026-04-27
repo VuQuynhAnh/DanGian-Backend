@@ -1,7 +1,6 @@
 # AI Workflow — Quy trình làm việc với Claude
 
-> Tài liệu này định nghĩa cách Developer và Claude phối hợp xuyên suốt dự án.  
-> Đọc kỹ trước khi bắt đầu bất kỳ phase nào.
+> Tài liệu này định nghĩa cách Developer và Claude phối hợp xuyên suốt dự án.
 
 ---
 
@@ -42,283 +41,165 @@
 
 ---
 
-## Phase 1 — Tài liệu & Thiết kế
-
-### Mục tiêu
-Hoàn thiện toàn bộ tài liệu kỹ thuật trước khi viết một dòng code.
-
-### Danh sách tài liệu cần hoàn thiện
-
-- [x] `PROJECT_CONTEXT.md` — context tổng quan (file này)
-- [x] `SYSTEM_DESIGN.md` — kiến trúc hệ thống
-- [x] `FREE_STACK.md` — quyết định công nghệ + free tier
-- [x] `AI_WORKFLOW.md` — quy trình làm việc với AI
-- [ ] `API_SPEC.md` — OpenAPI/Swagger cho tất cả endpoints
-- [ ] `DATABASE_SCHEMA.md` — schema SQL đầy đủ với index
-- [ ] `GAME_RULES.md` — luật chơi Ô Ăn Quan (input cho game logic)
-- [ ] `ADR.md` — Architecture Decision Records
-- [ ] `CICD_GUIDE.md` — hướng dẫn setup CI/CD
-
-### Prompt pattern cho phase này
+## Context mỗi session (paste vào đầu session)
 
 ```
-Bạn là senior architect đang xây dựng [tên dự án].
-Context: [dán PROJECT_CONTEXT.md hoặc đoạn liên quan]
+Dự án: Dân Gian Backend
+Stack: C# 12 / .NET 8, Clean Architecture + DDD + CQRS (MediatR 14), EF Core 8
+Pattern: Controller → Sender.Send(Command) → Pipeline Behaviors → Handler → Repository → Result<T>
+Docs: SYSTEM_DESIGN.md (kiến trúc), API_CONTRACT.md (endpoints), DATABASE_SCHEMA.md (schema)
 
-Hãy [tạo / hoàn thiện / review] [tên tài liệu] cho [phần cụ thể].
-Yêu cầu:
-- [yêu cầu 1]
-- [yêu cầu 2]
-Format output: Markdown, có thể dùng trực tiếp trong repo.
+Task hôm nay: [mô tả cụ thể]
+Context liên quan: [dán đoạn doc hoặc code nếu cần]
 ```
 
 ---
 
-## Phase 2 — Setup môi trường
+## Phase 3 — Phát triển feature (CQRS pattern)
 
-### Checklist
-
-- [ ] Tạo GitHub repo (public hoặc private)
-- [ ] Setup Supabase project + lấy connection string
-- [ ] Setup Upstash Redis + lấy connection string
-- [ ] Setup GitHub Secrets (DATABASE_URL, REDIS_URL, ZALO credentials...)
-- [ ] Claude sinh folder structure + base Dockerfiles
-- [ ] Claude sinh `docker-compose.yml` cho local dev
-- [ ] Claude sinh GitHub Actions workflows
-- [ ] Test: `docker compose up` chạy được local
-- [ ] Test: CI pipeline chạy xanh với empty project
-
-### Prompt pattern
+### Template prompt chuẩn
 
 ```
-Hãy sinh [docker-compose.yml / Dockerfile / workflow file] cho dự án Dân Gian.
-Stack: [liệt kê từ PROJECT_CONTEXT.md]
-Yêu cầu:
-- Environment variables từ .env file (không hardcode)
-- Health check endpoint /health cho mỗi service
-- [yêu cầu cụ thể khác]
-```
+Stack: C# 12 / .NET 8, Clean Architecture + CQRS (MediatR 14), EF Core 8, FluentValidation 12
 
----
+Context:
+- Bounded context: [Identity | Game | Mission | Leaderboard]
+- [Dán phần liên quan từ API_CONTRACT.md hoặc DATABASE_SCHEMA.md]
 
-## Phase 3 — Phát triển feature
-
-### Quy tắc viết prompt cho code
-
-**Template chuẩn:**
-```
-Context dự án: [dán đoạn liên quan từ SYSTEM_DESIGN.md hoặc API_SPEC.md]
-
-Task: Implement [tên feature/function cụ thể]
-
-Stack:
-- Language: C# / ASP.NET Core 8
-- Database: PostgreSQL (Supabase)
-- ORM: EF Core 8
-- Testing: xUnit + Moq
+Task: Implement [tên feature]
 
 Yêu cầu:
-1. [yêu cầu chức năng]
-2. [yêu cầu phi chức năng: performance, security]
-3. Follow pattern Repository + Service layer
+1. Command/Query record + Handler (internal sealed) + Validator + Response record
+2. Đặt tại: src/DanGian.Application/Features/{Context}/{Commands|Queries}/{Name}/
+3. Handler dùng Result.Failure() — không throw exception
+4. Repository method nếu chưa có (interface ở Domain, implementation ở Infrastructure)
+5. Controller endpoint trong src/DanGian.Api/Controllers/ kế thừa BaseApiController
 
 Output cần:
-- File implementation
-- File unit test
-- Giải thích các quyết định quan trọng
-- Checklist review trước khi merge
+- Tất cả file implementation
+- Unit test xUnit + Moq cho Handler
+- Giải thích quyết định kỹ thuật
+- Checklist review
 ```
 
 ### Ví dụ prompt tốt vs xấu
 
 **Xấu ❌:**
 ```
-Viết game service cho Ô Ăn Quan
+Viết API tạo phòng chơi
 ```
 
 **Tốt ✅:**
 ```
-Context: [dán phần Game Service từ SYSTEM_DESIGN.md]
+Stack: C# 12 / .NET 8, Clean Architecture + CQRS, MediatR 14, EF Core 8
 
-Task: Implement GameSession entity và GameSessionRepository
-Stack: C# + EF Core 8 + PostgreSQL
-Schema: [dán từ DATABASE_SCHEMA.md]
+Context (từ API_CONTRACT.md):
+POST /games/{gameType}/rooms → tạo phòng bạn bè
+Response: { roomId, roomCode, gameType, hostId, players[], status }
+
+Task: Implement CreateRoomCommand
 
 Yêu cầu:
-- Entity GameSession với các fields theo schema
-- Repository interface + implementation
-- Async/await toàn bộ
-- Không expose DB entity trực tiếp ra API (dùng DTO)
+- Command: CreateRoomCommand(Guid UserId, string GameType) : ICommand<CreateRoomResponse>
+- Handler: tạo Room aggregate, sinh roomCode 6 ký tự unique, lưu qua IRoomRepository
+- Validator: GameType không rỗng, phải là "o_an_quan" hoặc "co_caro"
+- Response record: CreateRoomResponse(Guid RoomId, string RoomCode, ...)
+- Controller: RoomsController.CreateRoom() → HandleResult(await Sender.Send(...))
 
-Output: file entity, repository, unit test với xUnit
+Schema Room (từ DATABASE_SCHEMA.md):
+[dán phần CREATE TABLE game.rooms]
+
+Output: tất cả file + unit test Handler
 ```
 
 ---
 
 ## Phase 4 — Testing
 
-### Yêu cầu coverage
-
-| Loại test | Công cụ | Target |
-|-----------|---------|--------|
-| Unit test | xUnit + Moq (C#), Jest (Node.js) | ≥ 80% business logic |
-| Integration test | xUnit + TestContainers | ≥ 60% API endpoints |
-| Game logic test | xUnit | 100% — không exception |
-
-### Prompt pattern cho test
+### Template prompt test
 
 ```
-Dựa trên implementation sau:
-[dán code đã viết]
+Dựa trên Handler sau (dán code):
 
-Hãy viết unit test xUnit cho:
-1. Happy path
-2. Edge cases: [liệt kê]
-3. Error cases: [liệt kê]
+Viết unit test xUnit + Moq cho LoginCommandHandler:
+1. Happy path: user chưa tồn tại → tạo mới → trả LoginResponse có AccessToken
+2. Happy path: user đã tồn tại → cập nhật profile → trả LoginResponse
+3. Edge case: ZaloId rỗng → ValidationBehavior chặn (test Validator riêng)
 
-Dùng Moq để mock dependencies.
-Tên test theo pattern: [MethodName]_[Scenario]_[ExpectedResult]
+Mock: IUserRepository, IUnitOfWork, IJwtTokenGenerator
+Naming: Handle_[Scenario]_[ExpectedResult]
 ```
 
-### Prompt pattern cho security review
+### Template prompt security review
 
 ```
 Review security cho đoạn code sau:
 [dán code]
 
-Kiểm tra theo OWASP Top 10:
-- SQL Injection
-- Authentication bypass
-- Missing input validation
-- Sensitive data exposure
-- Insecure direct object reference
+Kiểm tra:
+- SQL Injection (EF Core raw query?)
+- Input validation thiếu không?
+- Sensitive data bị log không?
+- JWT claims được validate đủ không?
+- Unauthorized access — thiếu [Authorize]?
 
-Báo cáo theo format: [Issue] → [Risk level] → [Fix]
+Báo cáo: [Issue] → [Risk level: High/Medium/Low] → [Fix]
 ```
-
----
-
-## Phase 5 — Deploy
-
-### Checklist deploy lần đầu
-
-- [ ] Build Docker image local thành công
-- [ ] Push image lên GHCR
-- [ ] Deploy lên Fly.io (hoặc Railway)
-- [ ] Kiểm tra health endpoint trả về 200
-- [ ] Kết nối Supabase + Upstash thành công
-- [ ] Chạy database migration
-- [ ] Setup UptimeRobot monitor
-- [ ] Setup Sentry error tracking
-- [ ] Test end-to-end: Mini App → API → DB
-
----
-
-## Quản lý context giữa các session
-
-### Vấn đề
-Claude không nhớ conversation cũ. Mỗi session mới = bắt đầu lại.
-
-### Giải pháp: Context file chuẩn bị sẵn
-
-Trước mỗi session code, bắt đầu bằng:
-
-```
-## Session context
-
-Dự án: Dân Gian (xem PROJECT_CONTEXT.md để biết full context)
-Phase hiện tại: [Phase 3 - Feature development]
-Service đang làm: [Identity Service]
-Task hôm nay: [Implement Zalo OAuth flow]
-
-Files đã có liên quan:
-- [dán nội dung file liên quan nếu cần]
-
-Tiếp tục từ: [mô tả trạng thái hiện tại]
-```
-
-### Tip: Dùng Claude Project
-
-Tạo một **Claude Project** và upload các file tài liệu vào đó. Claude sẽ tự động có context mà không cần paste mỗi lần.
-
-Files nên có trong Claude Project:
-1. `PROJECT_CONTEXT.md`
-2. `SYSTEM_DESIGN.md`
-3. `API_SPEC.md` (khi hoàn thiện)
-4. `DATABASE_SCHEMA.md` (khi hoàn thiện)
-5. `GAME_RULES.md` (khi hoàn thiện)
 
 ---
 
 ## Xử lý khi AI output không đúng
 
-### Tình huống 1: Code không follow tài liệu
+### Code không follow pattern CQRS
 ```
-Code bạn sinh không match với API spec ở [đoạn cụ thể].
-Theo spec, endpoint này phải trả về [X] nhưng code đang trả về [Y].
-Hãy sửa lại theo đúng spec.
+Code bạn sinh dùng Service layer thay vì Handler. Dự án này dùng CQRS với MediatR:
+- Không có IService — chỉ có ICommandHandler và IQueryHandler
+- Controller gọi Sender.Send(), không inject service
+- Handler trả Result<T>, không throw exception
+Hãy viết lại đúng pattern.
 ```
 
-### Tình huống 2: Code có bug
+### Code có bug
 ```
-Code này có bug: [mô tả bug + stack trace nếu có]
-Đây là behavior hiện tại: [X]
+Code này có bug: [mô tả + stack trace]
+Behavior hiện tại: [X]
 Expected behavior: [Y]
 Hãy phân tích nguyên nhân và fix.
 ```
 
-### Tình huống 3: Cần giải thích
+### Cần giải thích
 ```
 Tôi chưa hiểu đoạn code này:
-[dán đoạn code]
+[dán code]
 Giải thích:
-1. Nó làm gì?
-2. Tại sao chọn approach này thay vì [alternative]?
-3. Risk/trade-off là gì?
+1. Nó làm gì trong luồng CQRS?
+2. Tại sao không throw exception mà dùng Result.Failure?
+3. UnitOfWork ở đây có vai trò gì?
 ```
 
 ---
 
-## Thứ tự xây dựng đề xuất
+## Thứ tự xây dựng
 
 ```
-Tuần 1-2: Hoàn thiện tài liệu
-├── API_SPEC.md
-├── DATABASE_SCHEMA.md  
-├── GAME_RULES.md
-└── ADR.md
+Sprint 1: Identity Context
+├── LoginCommand (JWT issue từ ZaloId)
+└── GetProfileQuery
 
-Tuần 3: Setup hạ tầng
-├── GitHub repo + secrets
-├── Supabase + Upstash setup
-├── Docker + docker-compose local
-└── GitHub Actions CI (empty project)
+Sprint 2: Game Context — Solo
+├── CreateSessionCommand
+├── MakeMoveCommand (game logic engine)
+└── GameHub (SignalR real-time)
 
-Tuần 4-5: Identity Service
-├── User entity + migration
-├── Zalo OAuth flow
-├── JWT issue/refresh
-└── Unit test + integration test
+Sprint 3: Mission Context
+├── GetDailyMissionsQuery
+└── ClaimMissionCommand
 
-Tuần 6-7: Game Service (Ô Ăn Quan logic)
-├── GameSession entity + repository
-├── Game logic engine (pure functions)
-├── Solo mode vs AI
-└── Unit test game rules (100% coverage)
+Sprint 4: Leaderboard Context
+└── GetLeaderboardQuery
 
-Tuần 8: Realtime Service
-├── Socket.IO setup
-├── Room management
-├── Game state sync
-└── Reconnection handling
-
-Tuần 9: Mission + Leaderboard
-├── Daily mission system
-├── Points calculation
-└── Redis leaderboard
-
-Tuần 10: Integration + Deploy
-├── End-to-end test
-├── Deploy lên Fly.io
-└── Mini App kết nối API thật
+Sprint 5: Game Context — PvP
+├── CreateRoomCommand
+├── JoinRoomCommand
+└── Matchmaking (ranked)
 ```

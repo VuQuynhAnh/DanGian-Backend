@@ -1,5 +1,4 @@
 using DanGian.Domain.Common;
-using DanGian.Domain.Events;
 
 namespace DanGian.Domain.Identity;
 
@@ -24,12 +23,8 @@ public sealed class User : AggregateRoot
     public DateTime? LastLoginAt { get; private set; }
     public DateTime? DeletedAt { get; private set; }
 
-    public static User Create(string zaloId, string displayName, string? avatarUrl = null)
-    {
-        var user = new User(Guid.NewGuid(), zaloId, displayName, avatarUrl);
-        user.RaiseDomainEvent(new UserCreatedEvent(user.Id, zaloId, displayName));
-        return user;
-    }
+    public static User Create(string zaloId, string displayName, string? avatarUrl = null) =>
+        new(Guid.NewGuid(), zaloId, displayName, avatarUrl);
 
     public void UpdateProfile(string displayName, string? avatarUrl)
     {
@@ -38,23 +33,9 @@ public sealed class User : AggregateRoot
         UpdatedAt = DateTime.UtcNow;
     }
 
-    public void AddPoints(int points)
-    {
-        if (points <= 0) return;
-        TotalPoints += points;
-        UpdatedAt = DateTime.UtcNow;
-    }
-
     public void RecordLogin()
     {
         LastLoginAt = DateTime.UtcNow;
-        UpdatedAt = DateTime.UtcNow;
-    }
-
-    public void Deactivate()
-    {
-        IsActive = false;
-        DeletedAt = DateTime.UtcNow;
         UpdatedAt = DateTime.UtcNow;
     }
 }

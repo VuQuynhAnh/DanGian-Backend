@@ -1,6 +1,5 @@
 using DanGian.Domain.Common;
 using DanGian.Domain.Enums;
-using DanGian.Domain.Events;
 
 namespace DanGian.Domain.Game;
 
@@ -56,54 +55,9 @@ public sealed class GameSession : AggregateRoot
         AiDifficulty? aiDifficulty = null,
         Guid? roomId = null)
     {
-        var session = new GameSession(
+        return new GameSession(
             Guid.NewGuid(), gameType, mode, player1Id,
             player2Id, aiDifficulty, initialState, roomId);
-
-        session.RaiseDomainEvent(new GameSessionCreatedEvent(
-            session.Id, player1Id, player2Id, gameType, mode));
-
-        return session;
     }
 
-    public void Finish(
-        Guid? winnerId,
-        bool isDraw,
-        int player1Score,
-        int player2Score,
-        string finalState,
-        int pointsAwarded)
-    {
-        if (Status != GameStatus.Playing)
-            throw new InvalidOperationException("Cannot finish a session that is not in playing state.");
-
-        WinnerId = winnerId;
-        IsDraw = isDraw;
-        Player1Score = player1Score;
-        Player2Score = player2Score;
-        FinalState = finalState;
-        PointsAwarded = pointsAwarded;
-        Status = GameStatus.Finished;
-        EndedAt = DateTime.UtcNow;
-        UpdatedAt = DateTime.UtcNow;
-
-        RaiseDomainEvent(new GameSessionEndedEvent(
-            Id, winnerId, isDraw, player1Score, player2Score, pointsAwarded));
-    }
-
-    public void Abandon()
-    {
-        if (Status != GameStatus.Playing)
-            throw new InvalidOperationException("Cannot abandon a session that is not in playing state.");
-
-        Status = GameStatus.Abandoned;
-        EndedAt = DateTime.UtcNow;
-        UpdatedAt = DateTime.UtcNow;
-    }
-
-    public void RecordMove(string movesJson)
-    {
-        Moves = movesJson;
-        UpdatedAt = DateTime.UtcNow;
-    }
 }

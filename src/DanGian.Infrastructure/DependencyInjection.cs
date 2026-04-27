@@ -1,6 +1,6 @@
 using System.Text;
 using DanGian.Application.Abstractions;
-using DanGian.Domain.Repositories;
+using DanGian.Domain.IRepositories;
 using DanGian.Infrastructure.Authentication;
 using DanGian.Infrastructure.Persistence;
 using DanGian.Infrastructure.Persistence.Repositories;

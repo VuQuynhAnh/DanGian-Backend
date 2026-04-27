@@ -1,6 +1,6 @@
 using DanGian.Domain.Identity;
 
-namespace DanGian.Domain.Repositories;
+namespace DanGian.Domain.IRepositories;
 
 public interface IUserRepository
 {

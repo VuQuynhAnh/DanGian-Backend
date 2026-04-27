@@ -1,5 +1,5 @@
 using DanGian.Domain.Mission;
-using DanGian.Domain.Repositories;
+using DanGian.Domain.IRepositories;
 using Microsoft.EntityFrameworkCore;
 
 namespace DanGian.Infrastructure.Persistence.Repositories;

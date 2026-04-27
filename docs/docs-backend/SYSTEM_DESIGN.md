@@ -1,191 +1,309 @@
 # System Design — Backend
 
-> Tài liệu nội bộ Backend. Frontend không cần biết nội dung này.
+> Tài liệu nội bộ Backend. Đây là source of truth về kiến trúc thực tế của dự án.
 
 ---
 
-## Microservices overview
+## Kiến trúc tổng quan
 
-| Service | Port | Runtime | Trách nhiệm |
-|---------|------|---------|-------------|
-| API Gateway | 5000 | C# YARP | Route, JWT validate, rate limit |
-| Identity Service | 5001 | C# ASP.NET Core 8 | Zalo OAuth, JWT, user CRUD |
-| Game Service | 5002 | C# ASP.NET Core 8 | Game logic, sessions, history |
-| Realtime Service | 5003 | Node.js 20 + Socket.IO | WebSocket, room management |
-| Mission Service | 5004 | C# ASP.NET Core 8 | Daily missions, points |
-| Leaderboard Service | 5005 | C# ASP.NET Core 8 | Rankings, seasons |
-
----
-
-## Giao tiếp nội bộ
+**Single API** — Clean Architecture + Domain Driven Design (DDD) + CQRS (MediatR)
 
 ```
-Client request
-   │
-   ▼
-API Gateway (JWT validate tại đây — 1 lần duy nhất)
-   │
-   ├── /auth/*       → Identity Service (HTTP)
-   ├── /users/*      → Identity Service (HTTP)
-   ├── /games/*      → Game Service (HTTP)
-   ├── /missions/*   → Mission Service (HTTP)
-   ├── /leaderboard/* → Leaderboard Service (HTTP)
-   └── /socket.io    → Realtime Service (WebSocket proxy)
-
-Service-to-service (async):
-   Game Service ──[Redis Pub/Sub]──→ Mission Service (game ended event)
-   Game Service ──[Redis Pub/Sub]──→ Leaderboard Service (score update)
-   Mission Service ──[Redis Pub/Sub]──→ Realtime Service (mission notification)
+src/
+  DanGian.Domain/          ← Entities, ValueObjects, Interfaces, Domain Events
+  DanGian.Application/     ← CQRS (MediatR), Use Cases, Validators, Pipeline Behaviors
+  DanGian.Infrastructure/  ← EF Core, Repositories, JWT, UnitOfWork
+  DanGian.Api/             ← Controllers, SignalR Hubs, Middleware, Program.cs
+tests/
+  DanGian.UnitTests/       ← Domain + Application tests
+  DanGian.IntegrationTests/← API integration tests
 ```
 
 ---
 
-## Redis key patterns
+## Luồng xử lý một HTTP Request
 
-| Key | Type | TTL | Dùng cho |
-|-----|------|-----|---------|
-| `session:{userId}` | Hash | 7 ngày | Refresh token store |
-| `ratelimit:{userId}:{endpoint}` | Counter | 1 phút | Rate limiting |
-| `room:{roomId}` | JSON | 2 giờ | Room state |
-| `room:{roomId}:players` | Set | 2 giờ | Player IDs trong phòng |
-| `game:{sessionId}:state` | JSON | 1 giờ | Game state realtime |
-| `queue:ranked:{gameType}` | List | - | Matchmaking queue |
-| `leaderboard:weekly:{weekKey}` | Sorted Set | 7 ngày | Weekly rankings |
-| `leaderboard:season:{seasonId}` | Sorted Set | 90 ngày | Season rankings |
-| `mission:{userId}:{date}` | Hash | 2 ngày | Daily mission progress |
-| `user:profile:{userId}` | JSON | 5 phút | Profile cache |
+```
+HTTP Request
+    ↓
+GlobalExceptionMiddleware          ← bắt mọi unhandled exception → ApiResponse<T>
+    ↓
+Authentication/Authorization       ← JWT Bearer validation
+    ↓
+Controller (kế thừa BaseApiController)
+    ↓
+Sender.Send(ICommand | IQuery)     ← MediatR dispatch
+    ↓
+LoggingBehavior                    ← log tên request/response
+    ↓
+ValidationBehavior                 ← chạy FluentValidation, throw nếu lỗi
+    ↓
+CommandHandler | QueryHandler      ← business logic
+    ↓
+Repository → EF Core → PostgreSQL
+    ↓
+Result<T>  ←────────────────────── trả về
+    ↓
+BaseApiController.HandleResult()   ← map Result → HTTP status code
+    ↓
+ApiResponse<T>                     ← { success, data, error, meta }
+```
 
 ---
 
-## Redis Pub/Sub channels
+## Layer chi tiết
 
-| Channel | Publisher | Subscriber | Payload |
-|---------|-----------|------------|---------|
-| `game.ended` | Game Service | Mission, Leaderboard | `{sessionId, players, scores, gameType}` |
-| `mission.completed` | Mission Service | Realtime | `{userId, missionId, reward}` |
-| `score.updated` | Mission Service | Leaderboard | `{userId, delta, newTotal}` |
-| `match.found` | Game Service | Realtime | `{sessionId, player1Id, player2Id}` |
+### API Layer — `src/DanGian.Api/`
+
+| File | Vai trò |
+|------|---------|
+| `Controllers/BaseApiController.cs` | Base class: expose `Sender`, `CurrentUserId`, `HandleResult()` |
+| `Middleware/GlobalExceptionMiddleware.cs` | Bắt exception → map sang HTTP 4xx/5xx + `ApiResponse<T>` |
+| `Hubs/GameHub.cs` | SignalR hub cho real-time game |
+| `Program.cs` | Middleware pipeline + DI wiring |
+
+**Middleware order trong Program.cs:**
+```
+GlobalExceptionMiddleware
+→ Serilog request logging
+→ CORS
+→ HTTPS redirection
+→ Authentication (JWT)
+→ Authorization
+→ MapControllers
+→ MapHub<GameHub>("/hubs/game")
+```
+
+**BaseApiController pattern:**
+```csharp
+protected IActionResult HandleResult<T>(Result<T> result) =>
+    result.IsSuccess
+        ? Ok(ApiResponse<T>.Ok(result.Value))
+        : BadRequest(ApiResponse<T>.Fail(result.Error.Code, result.Error.Message));
+```
 
 ---
 
-## Clean Architecture (mỗi C# service)
+### Application Layer — `src/DanGian.Application/`
+
+#### Abstractions
+
+| Interface | Mô tả |
+|-----------|-------|
+| `ICommand<TResponse>` | Marker interface cho write operations |
+| `IQuery<TResponse>` | Marker interface cho read operations |
+| `ICommandHandler<TCommand, TResponse>` | Handler cho command |
+| `IQueryHandler<TQuery, TResponse>` | Handler cho query |
+| `IUnitOfWork` | Commit DB + publish domain events |
+| `IJwtTokenGenerator` | Generate JWT token |
+
+#### Pipeline Behaviors (chạy theo thứ tự)
+
+1. **LoggingBehavior** — log `Handling {RequestName}` / `Handled {RequestName}`
+2. **ValidationBehavior** — chạy tất cả `IValidator<TRequest>`, throw `ValidationException` nếu fail
+
+#### Cấu trúc Feature
 
 ```
-ServiceName/
-├── Controllers/          ← HTTP endpoints, validate input, trả response
-├── Services/
-│   ├── Interfaces/       ← IGameService, IMissionService...
-│   └── Implementations/  ← Business logic
-├── Repositories/
-│   ├── Interfaces/       ← IGameSessionRepository...
-│   └── Implementations/  ← EF Core queries
-├── Models/
-│   ├── Entities/         ← EF Core entities (map với DB)
-│   ├── DTOs/             ← Request/Response objects
-│   └── Enums/
-├── Middleware/           ← Exception handler, logging...
-├── Extensions/           ← DI registration, builder extensions
-└── Migrations/           ← EF Core migrations
+Features/
+  {Context}/
+    Commands/
+      {FeatureName}/
+        {Name}Command.cs          ← record implements ICommand<TResponse>
+        {Name}CommandHandler.cs   ← internal sealed, implements ICommandHandler
+        {Name}CommandValidator.cs ← AbstractValidator<TCommand>
+        {Name}Response.cs         ← sealed record (DTO trả về)
+    Queries/
+      {FeatureName}/
+        {Name}Query.cs
+        {Name}QueryHandler.cs
+        {Name}Response.cs
 ```
 
-**Layer rule:** Controller → Service → Repository → Entity
-- Service KHÔNG gọi trực tiếp DbContext
-- Controller KHÔNG chứa business logic
-- Entity KHÔNG expose ra ngoài — dùng DTO
+#### Bounded Contexts hiện có
+
+| Context | Commands | Queries |
+|---------|----------|---------|
+| Identity | `LoginCommand` | `GetProfileQuery` |
+| Game | `CreateSessionCommand` | *(chưa có)* |
+| Mission | *(chưa có)* | *(chưa có)* |
+| Leaderboard | *(chưa có)* | *(chưa có)* |
+
+#### DI Registration — `DependencyInjection.cs`
+
+```csharp
+services.AddMediatR(cfg =>
+{
+    cfg.RegisterServicesFromAssembly(assembly);
+    cfg.AddBehavior(typeof(IPipelineBehavior<,>), typeof(LoggingBehavior<,>));
+    cfg.AddBehavior(typeof(IPipelineBehavior<,>), typeof(ValidationBehavior<,>));
+});
+services.AddValidatorsFromAssembly(assembly);
+```
+
+---
+
+### Domain Layer — `src/DanGian.Domain/`
+
+#### Result Pattern
+
+```csharp
+// Tạo thành công
+Result.Success(new LoginResponse(...))
+Result<T>.Success(value)
+
+// Tạo lỗi
+Result.Failure(Error.NotFound("User", id))
+Result<T>.Failure(error)
+```
+
+#### Error factory
+
+```csharp
+Error.NotFound(string resource, object id)    // → 404
+Error.Conflict(string code, string message)   // → 409
+Error.Validation(string code, string message) // → 422
+Error.None                                    // sentinel cho success
+```
+
+#### Aggregates
+
+| Aggregate | File |
+|-----------|------|
+| `User` | `Aggregates/User.cs` |
+| `GameSession` | `Aggregates/GameSession.cs` |
+| `Room` | `Aggregates/Room.cs` |
+| `MissionDefinition` | `Aggregates/MissionDefinition.cs` |
+| `UserMissionProgress` | `Aggregates/UserMissionProgress.cs` |
+| `Season` | `Aggregates/Season.cs` |
+
+**AggregateRoot** chứa `DomainEvents` list — UnitOfWork publish sau khi SaveChanges.
+
+#### Repository Interfaces
+
+| Interface | Location |
+|-----------|----------|
+| `IUserRepository` | `IRepositories/IUserRepository.cs` |
+| `IGameSessionRepository` | `IRepositories/IGameSessionRepository.cs` |
+| `IRoomRepository` | `IRepositories/IRoomRepository.cs` |
+| `IMissionRepository` | `IRepositories/IMissionRepository.cs` |
+| `ILeaderboardRepository` | `IRepositories/ILeaderboardRepository.cs` |
+
+---
+
+### Infrastructure Layer — `src/DanGian.Infrastructure/`
+
+#### Persistence
+
+| File | Vai trò |
+|------|---------|
+| `Persistence/ApplicationDbContext.cs` | EF Core DbContext |
+| `Persistence/UnitOfWork.cs` | `SaveChangesAsync()` + publish domain events |
+| `Persistence/Repositories/BaseRepository<T>` | `GetByIdAsync`, `AddAsync`, `Update` |
+| `Persistence/Repositories/UserRepository.cs` | implements `IUserRepository` |
+| `Persistence/Repositories/GameSessionRepository.cs` | implements `IGameSessionRepository` |
+
+#### UnitOfWork flow
+
+```
+SaveChangesAsync()
+  → _context.SaveChangesAsync()      ← commit DB
+  → PublishDomainEventsAsync()        ← lấy events từ AggregateRoot, clear, publish qua MediatR IPublisher
+```
+
+#### DI Registration — `DependencyInjection.cs`
+
+```csharp
+services.AddScoped<IUserRepository, UserRepository>();
+services.AddScoped<IGameSessionRepository, GameSessionRepository>();
+// ... các repository khác
+```
+
+---
+
+## Response format chuẩn
+
+```json
+{
+  "success": true,
+  "data": { ... },
+  "error": null,
+  "meta": {
+    "timestamp": "2026-04-27T...",
+    "version": "1.0"
+  }
+}
+```
+
+Lỗi:
+```json
+{
+  "success": false,
+  "data": null,
+  "error": { "code": "User.NotFound", "message": "User with id '...' was not found." },
+  "meta": { ... }
+}
+```
+
+---
+
+## Exception → HTTP status mapping
+
+| Exception | HTTP |
+|-----------|------|
+| `NotFoundException` | 404 |
+| `ValidationException` | 422 |
+| `DomainException` | 400 |
+| `UnauthorizedAccessException` | 401 |
+| Unhandled | 500 |
 
 ---
 
 ## JWT Strategy
 
 ```
-Access Token:  15 phút — dùng cho mọi API call
-Refresh Token: 7 ngày  — lưu trên Redis, rotate sau mỗi lần refresh
-
-Claims trong Access Token:
-  sub      = userId (UUID)
-  zalo_id  = Zalo user ID
-  role     = "user" | "admin"
-  iat, exp
-
-API Gateway validate JWT → inject userId vào header X-User-Id
-Các service downstream đọc X-User-Id — không validate JWT lại
+Access Token: JWT Bearer
+Claims: sub (userId), role
+Validate tại Authentication middleware của ASP.NET Core
+CurrentUserId đọc từ ClaimTypes.NameIdentifier hoặc "sub" claim
 ```
 
 ---
 
-## Error handling chuẩn (C#)
+## Real-time (SignalR)
+
+Hub: `src/DanGian.Api/Hubs/GameHub.cs`
+Endpoint: `/hubs/game`
+
+---
+
+## Thêm feature mới — CQRS checklist
+
+```
+1. Domain:        tạo/cập nhật Entity, thêm method vào Aggregate nếu cần
+2. Application:   tạo Command/Query + Handler + Validator + Response record
+                  → src/DanGian.Application/Features/{Context}/{Commands|Queries}/{Name}/
+3. Infrastructure: implement Repository method nếu cần
+4. Api:           thêm endpoint vào Controller (kế thừa BaseApiController)
+                  → return HandleResult(await Sender.Send(new XxxCommand(...)));
+```
+
+---
+
+## Conventions bắt buộc
 
 ```csharp
-// Custom exception hierarchy
-DanGianException (base)
-├── ValidationException      → 422
-├── NotFoundException        → 404
-├── UnauthorizedException    → 401
-├── ForbiddenException       → 403
-├── ConflictException        → 409
-└── GameException
-    ├── InvalidMoveException → 422
-    ├── RoomFullException    → 409
-    └── GameNotFoundException→ 404
+// Handler: internal sealed class
+internal sealed class LoginCommandHandler : ICommandHandler<LoginCommand, LoginResponse>
 
-// Global middleware bắt exception → format response chuẩn theo API_CONTRACT
-```
+// Command/Query/Response: sealed record
+public sealed record LoginCommand(string ZaloId, string DisplayName) : ICommand<LoginResponse>;
+public sealed record LoginResponse(Guid UserId, string AccessToken);
 
----
+// Repository method: async + CancellationToken
+Task<User?> GetByZaloIdAsync(string zaloId, CancellationToken ct = default);
 
-## Deployment topology
-
-```
-VPS / Fly.io / Railway
-├── nginx (reverse proxy, SSL termination)
-│   ├── api.dangian.app → api-gateway:5000
-│   └── wss://api.dangian.app/socket.io → realtime-service:5003
-├── api-gateway container
-├── identity-service container
-├── game-service container
-├── realtime-service container
-├── mission-service container
-└── leaderboard-service container
-
-External (free tier):
-├── Supabase → PostgreSQL
-└── Upstash  → Redis
-```
-
----
-
-## Docker Compose (local dev)
-
-```yaml
-# docker-compose.yml tóm tắt
-services:
-  postgres:
-    image: postgres:16-alpine
-    environment:
-      POSTGRES_DB: dangian
-      POSTGRES_USER: ${DB_USER}
-      POSTGRES_PASSWORD: ${DB_PASSWORD}
-    ports: ["5432:5432"]
-
-  redis:
-    image: redis:7-alpine
-    ports: ["6379:6379"]
-
-  api-gateway:
-    build: ./apps/api-gateway
-    ports: ["5000:5000"]
-    depends_on: [postgres, redis]
-    environment:
-      - IDENTITY_SERVICE_URL=http://identity-service:5001
-      - GAME_SERVICE_URL=http://game-service:5002
-
-  identity-service:
-    build: ./apps/identity-service
-    ports: ["5001:5001"]
-    environment:
-      - DATABASE_URL=${DATABASE_URL}
-      - JWT_SECRET=${JWT_SECRET}
-      - ZALO_APP_ID=${ZALO_APP_ID}
-      - ZALO_APP_SECRET=${ZALO_APP_SECRET}
-  # ... các service khác tương tự
+// KHÔNG dùng .Result hoặc .Wait() — deadlock risk
+// KHÔNG expose Entity ra ngoài Controller — dùng Response record
+// KHÔNG throw exception từ Handler — dùng Result.Failure(error)
 ```

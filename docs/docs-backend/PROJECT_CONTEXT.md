@@ -1,6 +1,6 @@
 # Dân Gian Platform — Project Context
 
-> **Dùng file này làm Project Instructions trong cả 2 Claude Project (Backend + Frontend).**
+> **Dùng file này làm context chung cho mọi session làm việc với dự án.**
 
 ---
 
@@ -23,28 +23,25 @@
 
 ```
 [Zalo Mini App - TypeScript]
-         │  HTTPS / WebSocket
+         │  HTTPS / WebSocket (SignalR)
          ▼
-   [API Gateway :5000]
+[Single API — ASP.NET Core 8]
+   ├── REST Controllers (api/[controller])
+   └── SignalR Hub (/hubs/game)
          │
-    ┌────┴──────────────────┐
-    ▼                       ▼
-[Identity :5001]     [Game :5002]
-                           │
-                    [Realtime :5003]  ← Socket.IO
-                    [Mission :5004]
-                    [Leaderboard :5005]
+         ▼
+   [PostgreSQL — Supabase]
 ```
 
 **Nguyên tắc giao tiếp:**
-- Frontend ↔ Backend: REST API + Socket.IO (xem `API_CONTRACT.md`)
+- Frontend ↔ Backend: REST API + SignalR (xem `API_CONTRACT.md`)
 - Frontend KHÔNG biết nội bộ backend hoạt động như thế nào
 - Backend KHÔNG biết frontend render như thế nào
 - `API_CONTRACT.md` là ranh giới và nguồn sự thật duy nhất giữa 2 phía
 
 ---
 
-## Tech Stack theo resource
+## Tech Stack
 
 ### Frontend (Zalo Mini App)
 | Layer | Công nghệ |
@@ -52,20 +49,50 @@
 | Framework | Zalo Mini App SDK + TypeScript |
 | UI | React-based components |
 | State | Zustand hoặc React Context |
-| Realtime | Socket.IO Client |
+| Realtime | SignalR JS Client |
 | HTTP | Axios hoặc Fetch API |
 | Build | Zalo CLI |
 
-### Backend (API)
+### Backend (Single API)
 | Layer | Công nghệ |
 |-------|-----------|
-| API | C# / ASP.NET Core 8 — Microservices |
-| Gateway | YARP |
-| Realtime | Node.js + Socket.IO |
+| Runtime | C# 12 / .NET 8 (ASP.NET Core) |
+| Pattern | Clean Architecture + DDD + CQRS |
+| CQRS | MediatR 14 |
+| ORM | EF Core 8 + Npgsql |
+| Validation | FluentValidation 12 |
+| Auth | JWT Bearer |
+| Realtime | SignalR |
+| Logging | Serilog → stdout |
 | Database | PostgreSQL (Supabase) |
-| Cache | Redis (Upstash) |
-| Deploy | Fly.io + Railway |
+| Deploy | Fly.io hoặc Railway |
 | CI/CD | GitHub Actions |
+
+---
+
+## Cấu trúc dự án
+
+```
+src/
+  DanGian.Domain/          ← Entities, ValueObjects, IRepositories, Domain Events, Result/Error
+  DanGian.Application/     ← CQRS handlers, Pipeline Behaviors, Validators, Abstractions
+  DanGian.Infrastructure/  ← EF Core, Repository implementations, UnitOfWork, JWT
+  DanGian.Api/             ← Controllers, Hubs, Middleware, Program.cs
+tests/
+  DanGian.UnitTests/       ← Domain + Application tests
+  DanGian.IntegrationTests/← API integration tests
+```
+
+---
+
+## Bounded Contexts
+
+| Context | Aggregates | Features hiện có |
+|---------|------------|-----------------|
+| Identity | `User` | `LoginCommand`, `GetProfileQuery` |
+| Game | `GameSession`, `Room` | `CreateSessionCommand` |
+| Mission | `MissionDefinition`, `UserMissionProgress` | *(chưa có)* |
+| Leaderboard | `Season` | *(chưa có)* |
 
 ---
 
@@ -108,4 +135,6 @@ Claude đóng vai **Senior Developer**, có nhiệm vụ:
 - [ ] test pass
 - [ ] không hardcode secret
 - [ ] follow API contract
+- [ ] FluentValidation đầy đủ
+- [ ] async/await + CancellationToken
 ```

@@ -1,7 +1,7 @@
 using DanGian.Application.Abstractions.Messaging;
 using DanGian.Domain.Identity;
 using DanGian.Domain.Primitives;
-using DanGian.Domain.Repositories;
+using DanGian.Domain.IRepositories;
 
 namespace DanGian.Application.Features.Identity.Queries.GetProfile;
 
