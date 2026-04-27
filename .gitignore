@@ -1,0 +1,66 @@
+## Build artifacts
+bin/
+obj/
+out/
+
+## Visual Studio / Rider
+.vs/
+.idea/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+*.userprefs
+
+## Logs
+logs/
+*.log
+log/
+
+## .NET
+*.dll
+*.exe
+!tools/*.exe
+*.pdb
+*.mdb
+*.nupkg
+*.snupkg
+*.lock.json
+!packages.lock.json
+
+## Publish output
+publish/
+**/publish/
+
+## NuGet
+.nuget/
+packages/
+*.nupkg
+*.snupkg
+project.lock.json
+project.fragment.lock.json
+
+## Coverage
+coverage/
+*.coverage
+*.coveragexml
+TestResults/
+BenchmarkDotNet.Artifacts/
+
+## Secrets / config (đừng commit secrets)
+appsettings.*.json
+!appsettings.json
+!appsettings.Development.json
+*.pfx
+*.p12
+.env
+.env.*
+secrets.json
+
+## OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+## Docker
+docker-compose.override.yml

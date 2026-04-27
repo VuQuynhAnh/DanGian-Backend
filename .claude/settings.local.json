@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "PowerShell(Get-Content \"C:\\\\Users\\\\LENOVO\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\c--Source-code-DanGian-Backend\\\\c449a1d6-2453-4d06-915a-4f279c623967\\\\tasks\\\\bjqyy3jzn.output\" -Wait -Tail 30)",
+      "PowerShell(Get-ChildItem \"c:\\\\Source code\\\\DanGian-Backend\\\\src\\\\DanGian.Api\" -Recurse | Where-Object { -not $_.PSIsContainer } | Select-Object FullName | Format-Table -AutoSize)"
+    ]
+  }
+}
